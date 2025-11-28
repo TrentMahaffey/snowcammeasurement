@@ -1,0 +1,25 @@
+{
+    "resort": "winter_park",
+    "enabled": true,
+    "method": "marker_interpolation",
+    "tilt_angle": 0.0,
+    "stake_centerline_x": 815,
+    "stake_region_x": 780,
+    "stake_region_y": 280,
+    "stake_region_width": 70,
+    "stake_region_height": 540,
+    "min_depth_threshold": 1.0,
+    "notes": "Winter Park red chevron ruler. Uses marker_positions for lens distortion correction. Stake region covers the RED ruler strip with white numbers 2-18.",
+    "marker_positions": {
+        "0": 800,
+        "2": 745,
+        "4": 690,
+        "6": 635,
+        "8": 580,
+        "10": 525,
+        "12": 470,
+        "14": 415,
+        "16": 360,
+        "18": 305
+    }
+}

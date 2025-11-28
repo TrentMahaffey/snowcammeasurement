@@ -1,0 +1,16 @@
+{
+    "resort": "snowmass",
+    "enabled": true,
+    "method": "linear",
+    "pixels_per_inch": 27.375,
+    "tilt_angle": -1.7,
+    "reference_x": 681,
+    "reference_y": 988,
+    "stake_centerline_x": 675,
+    "stake_region_x": 455,
+    "stake_region_y": 467,
+    "stake_region_width": 440,
+    "stake_region_height": 521,
+    "min_depth_threshold": 1.0,
+    "notes": "Tilt-aware calibration. Tilt=-1.7deg detected from text baselines. Linear pixels_per_inch works well for this camera."
+}
