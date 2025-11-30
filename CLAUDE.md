@@ -82,11 +82,12 @@ Each resort has its own folder in `resorts/` with:
 ## Running the Frontend
 
 ```bash
-# Docker (current setup)
+# Docker (current setup - DEBUG=true enables auto-reload on code changes)
 docker run -d --name snow_frontend \
   -v /home/trent/snowcammeasurement:/app:ro \
   -v /home/trent/snowcamtimelapse/out:/out \
   -p 5001:5000 \
+  -e DEBUG=true \
   --restart unless-stopped \
   python:3.11-slim \
   bash -c "pip install -q flask opencv-python-headless scipy && python3 -u /app/snowcammeasurement/frontend.py"

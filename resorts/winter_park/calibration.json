@@ -1,25 +1,41 @@
 {
-    "resort": "winter_park",
-    "enabled": true,
-    "method": "marker_interpolation",
-    "tilt_angle": 0.0,
-    "stake_centerline_x": 815,
-    "stake_region_x": 780,
-    "stake_region_y": 280,
-    "stake_region_width": 70,
-    "stake_region_height": 540,
-    "min_depth_threshold": 1.0,
-    "notes": "Winter Park red chevron ruler. Uses marker_positions for lens distortion correction. Stake region covers the RED ruler strip with white numbers 2-18.",
-    "marker_positions": {
-        "0": 800,
-        "2": 745,
-        "4": 690,
-        "6": 635,
-        "8": 580,
-        "10": 525,
-        "12": 470,
-        "14": 415,
-        "16": 360,
-        "18": 305
-    }
+  "resort": "winter_park",
+  "enabled": true,
+  "method": "marker_interpolation",
+  "tilt_angle": 0.0,
+  "stake_centerline_x": 815,
+  "stake_region_x": 780,
+  "stake_region_y": 280,
+  "stake_region_width": 70,
+  "stake_region_height": 540,
+  "min_depth_threshold": 0.0,
+  "notes": "Winter Park red chevron ruler. Uses marker_positions for lens distortion correction. Stake region covers the RED ruler strip with white numbers 2-18.",
+  "marker_positions": {
+    "0": 1000,
+    "2": 926,
+    "4": 864,
+    "6": 790,
+    "8": 716,
+    "10": 642,
+    "12": 579,
+    "14": 499,
+    "16": 438,
+    "18": 371
+  },
+  "stake_corners": {
+    "top_left": [962, 352],
+    "top_right": [1050, 345],
+    "bottom_left": [986, 1015],
+    "bottom_right": [1076, 999]
+  },
+  "stake_axis": {
+    "top": [1009, 341],
+    "bottom": [1034, 1017]
+  },
+  "sample_bounds": {
+    "top_left": [634, 954],
+    "top_right": [1476, 975],
+    "bottom_left": [500, 1070],
+    "bottom_right": [1617, 1061]
+  }
 }

@@ -78,8 +78,9 @@ def measure_and_store(
 
     try:
         # Get config and check if enabled
+        # Pass timestamp to get calibration effective at that time
         config_manager = _get_config_manager(config_path, db_path)
-        calibration = config_manager.get_calibration(resort)
+        calibration = config_manager.get_calibration(resort, timestamp)
 
         if not calibration:
             if verbose:
@@ -98,8 +99,8 @@ def measure_and_store(
             debug=False
         )
 
-        # Get calibration dict
-        cal_dict = config_manager.get_calibration_dict(resort)
+        # Get calibration dict (for timestamp-specific config)
+        cal_dict = config_manager.get_calibration_dict(resort, timestamp)
 
         # Measure
         result = measurer.measure_from_file(image_path, cal_dict)

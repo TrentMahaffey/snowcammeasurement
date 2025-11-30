@@ -132,6 +132,77 @@ class SnowDatabase:
                 ON daily_calibrations(resort, date DESC)
             """)
 
+            # Time-based calibration versions table
+            # Stores full calibration configs with effective date ranges
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    resort TEXT NOT NULL,
+                    effective_from DATETIME NOT NULL,
+                    effective_to DATETIME,
+                    config_json TEXT NOT NULL,
+                    notes TEXT,
+                    created_by TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Index for efficient lookups by resort and date
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cal_versions_resort_effective
+                ON calibration_versions(resort, effective_from DESC)
+            """)
+
+    def get_measurement_for_hour(
+        self,
+        resort: str,
+        timestamp: datetime
+    ) -> Optional[Dict[str, Any]]:
+        """Check if a measurement exists for the given hour.
+
+        Args:
+            resort: Resort name
+            timestamp: Any timestamp within the hour to check
+
+        Returns:
+            Existing measurement dict or None
+        """
+        hour_start = timestamp.replace(minute=0, second=0, microsecond=0)
+        hour_end = hour_start.replace(minute=59, second=59)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM snow_measurements
+                WHERE resort = ? AND timestamp >= ? AND timestamp <= ?
+                LIMIT 1
+            """, (resort, hour_start, hour_end))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def delete_measurement(self, measurement_id: int) -> bool:
+        """Delete a measurement by ID.
+
+        Args:
+            measurement_id: ID of measurement to delete
+
+        Returns:
+            True if deleted, False if not found
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Delete samples first
+            cursor.execute(
+                "DELETE FROM measurement_samples WHERE measurement_id = ?",
+                (measurement_id,)
+            )
+            # Delete measurement
+            cursor.execute(
+                "DELETE FROM snow_measurements WHERE id = ?",
+                (measurement_id,)
+            )
+            return cursor.rowcount > 0
+
     def insert_measurement(
         self,
         resort: str,
@@ -142,9 +213,13 @@ class SnowDatabase:
         stake_visible: bool = False,
         raw_pixel_measurement: Optional[int] = None,
         notes: Optional[str] = None,
-        sample_data: Optional[List[Dict]] = None
+        sample_data: Optional[List[Dict]] = None,
+        replace_hourly: bool = True
     ) -> int:
         """Insert a snow depth measurement.
+
+        Only one measurement per hour per resort is allowed. If replace_hourly
+        is True and a measurement exists for this hour, it will be replaced.
 
         Args:
             resort: Resort name
@@ -156,11 +231,26 @@ class SnowDatabase:
             raw_pixel_measurement: Raw pixel count measurement
             notes: Optional notes
             sample_data: List of dicts with keys: sample_index, x_position, snow_line_y, depth_inches
+            replace_hourly: If True, replace existing measurement for this hour
 
         Returns:
             ID of inserted row
+
+        Raises:
+            ValueError: If measurement exists for this hour and replace_hourly is False
         """
         import json
+
+        # Check for existing measurement in this hour
+        existing = self.get_measurement_for_hour(resort, timestamp)
+        if existing:
+            if replace_hourly:
+                self.delete_measurement(existing['id'])
+            else:
+                raise ValueError(
+                    f"Measurement already exists for {resort} at "
+                    f"{timestamp.strftime('%Y-%m-%d %H:00')} (ID: {existing['id']})"
+                )
 
         # Calculate min/max/avg from sample data if provided
         depth_min = None
@@ -423,3 +513,137 @@ class SnowDatabase:
             )
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def save_calibration_version(
+        self,
+        resort: str,
+        effective_from: datetime,
+        config: Dict[str, Any],
+        notes: Optional[str] = None,
+        created_by: Optional[str] = None
+    ) -> int:
+        """Save a new calibration version with an effective date.
+
+        When a new calibration is saved, it automatically closes out the
+        previous calibration by setting its effective_to date.
+
+        Args:
+            resort: Resort name
+            effective_from: When this calibration becomes effective
+            config: Full calibration config dict
+            notes: Optional notes about this calibration
+            created_by: Optional identifier for who created this
+
+        Returns:
+            ID of inserted calibration version
+        """
+        import json
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Close out any existing calibration that would overlap
+            cursor.execute("""
+                UPDATE calibration_versions
+                SET effective_to = ?
+                WHERE resort = ?
+                  AND effective_from < ?
+                  AND (effective_to IS NULL OR effective_to > ?)
+            """, (effective_from, resort, effective_from, effective_from))
+
+            # Insert the new calibration version
+            cursor.execute("""
+                INSERT INTO calibration_versions
+                (resort, effective_from, config_json, notes, created_by)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                resort,
+                effective_from,
+                json.dumps(config),
+                notes,
+                created_by
+            ))
+
+            return cursor.lastrowid
+
+    def get_calibration_for_timestamp(
+        self,
+        resort: str,
+        timestamp: datetime
+    ) -> Optional[Dict[str, Any]]:
+        """Get the calibration that was effective at a specific timestamp.
+
+        Args:
+            resort: Resort name
+            timestamp: The timestamp to find calibration for
+
+        Returns:
+            Calibration config dict or None
+        """
+        import json
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT config_json FROM calibration_versions
+                WHERE resort = ?
+                  AND effective_from <= ?
+                  AND (effective_to IS NULL OR effective_to > ?)
+                ORDER BY effective_from DESC, id DESC
+                LIMIT 1
+            """, (resort, timestamp, timestamp))
+
+            row = cursor.fetchone()
+            if row:
+                return json.loads(row['config_json'])
+            return None
+
+    def get_calibration_versions(
+        self,
+        resort: str,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Get calibration version history for a resort.
+
+        Args:
+            resort: Resort name
+            limit: Maximum number of versions to return
+
+        Returns:
+            List of calibration version records (most recent first)
+        """
+        import json
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, resort, effective_from, effective_to,
+                       config_json, notes, created_by, created_at
+                FROM calibration_versions
+                WHERE resort = ?
+                ORDER BY effective_from DESC
+                LIMIT ?
+            """, (resort, limit))
+
+            results = []
+            for row in cursor.fetchall():
+                record = dict(row)
+                record['config'] = json.loads(record['config_json'])
+                del record['config_json']
+                results.append(record)
+
+            return results
+
+    def get_current_calibration_version(
+        self,
+        resort: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get the currently active calibration version for a resort.
+
+        Args:
+            resort: Resort name
+
+        Returns:
+            Current calibration config dict or None
+        """
+        return self.get_calibration_for_timestamp(resort, datetime.now())

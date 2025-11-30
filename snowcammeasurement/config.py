@@ -147,27 +147,88 @@ class CalibrationManager:
 
         self.save_config()
 
-    def get_calibration(self, resort: str) -> Optional[ResortCalibration]:
-        """Get calibration for a resort.
+    def get_calibration(self, resort: str, timestamp: Optional[Any] = None) -> Optional[ResortCalibration]:
+        """Get calibration for a resort, optionally for a specific timestamp.
+
+        Checks database for time-based calibration versions first,
+        then falls back to file-based configs.
 
         Args:
             resort: Resort name
+            timestamp: Optional datetime to get calibration effective at that time
 
         Returns:
             ResortCalibration object or None
         """
+        from datetime import datetime as dt
+
+        # First check database for time-based calibration
+        try:
+            if timestamp:
+                db_config = self.db.get_calibration_for_timestamp(resort, timestamp)
+            else:
+                db_config = self.db.get_current_calibration_version(resort)
+
+            if db_config:
+                # Convert dict to ResortCalibration
+                return self._dict_to_calibration(resort, db_config)
+        except Exception:
+            pass  # Fall through to file-based config
+
         return self.calibrations.get(resort)
 
-    def get_calibration_dict(self, resort: str) -> Optional[Dict[str, Any]]:
+    def _dict_to_calibration(self, resort: str, config: Dict[str, Any]) -> ResortCalibration:
+        """Convert a config dictionary to a ResortCalibration object."""
+        return ResortCalibration(
+            resort=resort,
+            pixels_per_inch=config.get('pixels_per_inch', 0),
+            stake_region_x=config.get('stake_region_x'),
+            stake_region_y=config.get('stake_region_y'),
+            stake_region_width=config.get('stake_region_width'),
+            stake_region_height=config.get('stake_region_height'),
+            stake_base_y=config.get('stake_base_y'),
+            stake_top_y=config.get('stake_top_y'),
+            reference_x=config.get('reference_x'),
+            reference_y=config.get('reference_y'),
+            stake_centerline_x=config.get('stake_centerline_x'),
+            tilt_angle=config.get('tilt_angle'),
+            marker_region_x=config.get('marker_region_x'),
+            marker_region_width=config.get('marker_region_width'),
+            marker_positions=config.get('marker_positions'),
+            base_region_x=config.get('base_region_x'),
+            base_region_y=config.get('base_region_y'),
+            base_region_width=config.get('base_region_width'),
+            base_region_height=config.get('base_region_height'),
+            reference_height_inches=config.get('reference_height_inches'),
+            reference_image_path=config.get('reference_image_path'),
+            min_depth_threshold=config.get('min_depth_threshold', 1.0),
+            enabled=config.get('enabled', True),
+            notes=config.get('notes', '')
+        )
+
+    def get_calibration_dict(self, resort: str, timestamp: Optional[Any] = None) -> Optional[Dict[str, Any]]:
         """Get calibration as dictionary (for compatibility).
 
         Args:
             resort: Resort name
+            timestamp: Optional datetime to get calibration effective at that time
 
         Returns:
             Dictionary with calibration data or None
         """
-        cal = self.get_calibration(resort)
+        # First check database directly for time-based calibration
+        try:
+            if timestamp:
+                db_config = self.db.get_calibration_for_timestamp(resort, timestamp)
+            else:
+                db_config = self.db.get_current_calibration_version(resort)
+
+            if db_config:
+                return db_config
+        except Exception:
+            pass
+
+        cal = self.get_calibration(resort, timestamp)
         if cal:
             result = {
                 'pixels_per_inch': cal.pixels_per_inch,

@@ -54,8 +54,77 @@ class SnowStakeMeasurer:
         """
         self.pixels_per_inch = pixels_per_inch
         self.stake_region = stake_region
+        self.sample_bounds = None
         self.debug = debug
         self.calibration = None
+        self.marker_positions = None  # For marker interpolation
+        self._sorted_markers = None
+
+    def y_to_inches(self, y: int) -> Optional[float]:
+        """Convert Y pixel position to depth in inches.
+
+        Uses marker interpolation if marker_positions is available,
+        otherwise falls back to linear pixels_per_inch calculation.
+        """
+        # Try marker interpolation first
+        if self.marker_positions and self._sorted_markers:
+            # Get reference (0" marker position)
+            ref_y = self.marker_positions.get('0') or self.marker_positions.get(0)
+            if ref_y is None:
+                ref_y = self._sorted_markers[0][1]
+
+            # If Y is at or below 0" marker, no snow
+            if y >= ref_y:
+                return 0.0
+
+            # If Y is above highest marker, extrapolate
+            top_marker = self._sorted_markers[-1]
+            if y <= top_marker[1]:
+                # Extrapolate using top two markers
+                if len(self._sorted_markers) >= 2:
+                    inch1, y1 = self._sorted_markers[-2]
+                    inch2, y2 = self._sorted_markers[-1]
+                    if y1 != y2:
+                        ppi_local = (y1 - y2) / (inch2 - inch1)
+                        extra_pixels = y2 - y
+                        extra_inches = extra_pixels / ppi_local
+                        return inch2 + extra_inches
+                return float(top_marker[0])
+
+            # Find bracketing markers and interpolate
+            lower_marker = self._sorted_markers[0]
+            upper_marker = self._sorted_markers[-1]
+
+            for i, (inch, marker_y) in enumerate(self._sorted_markers):
+                if marker_y >= y:
+                    lower_marker = (inch, marker_y)
+                    if i + 1 < len(self._sorted_markers):
+                        upper_marker = self._sorted_markers[i + 1]
+                    break
+
+            inch_low, y_low = lower_marker
+            inch_high, y_high = upper_marker
+
+            if y_low == y_high:
+                return float(inch_low)
+
+            fraction = (y_low - y) / (y_low - y_high)
+            return inch_low + fraction * (inch_high - inch_low)
+
+        # Fall back to linear calculation
+        if self.pixels_per_inch and self.calibration:
+            ref_y = self.calibration.get('reference_y')
+            if ref_y is None:
+                marker_positions = self.calibration.get('marker_positions', {})
+                ref_y = marker_positions.get('0') or marker_positions.get(0)
+
+            if ref_y:
+                pixel_distance = ref_y - y
+                if pixel_distance > 0:
+                    return pixel_distance / self.pixels_per_inch
+                return 0.0
+
+        return None
 
     def measure_from_file(
         self,
@@ -102,10 +171,50 @@ class SnowStakeMeasurer:
             self.calibration = calibration
             self.pixels_per_inch = calibration.get('pixels_per_inch')
 
-            # Use base_region for sampling if provided, otherwise fall back to stake_region
-            # base_region is the full sign base where snow accumulates
-            # stake_region is the narrow ruler/stake area
-            if all(calibration.get(k) is not None for k in ['base_region_x', 'base_region_y', 'base_region_width', 'base_region_height']):
+            # Parse marker_positions for marker interpolation
+            raw_markers = calibration.get('marker_positions', {})
+            if raw_markers:
+                self.marker_positions = {}
+                for inch_str, y_pos in raw_markers.items():
+                    self.marker_positions[int(inch_str)] = y_pos
+                # Sort by inch value for interpolation
+                self._sorted_markers = sorted(self.marker_positions.items(), key=lambda x: x[0])
+
+            # Store sample_bounds for use in sample X positioning (if present)
+            sample_bounds = calibration.get('sample_bounds', {})
+            sb_tl = sample_bounds.get('top_left')
+            sb_tr = sample_bounds.get('top_right')
+            sb_bl = sample_bounds.get('bottom_left')
+            sb_br = sample_bounds.get('bottom_right')
+            if all([sb_tl, sb_tr, sb_bl, sb_br]):
+                self.sample_bounds = sample_bounds
+
+            # Determine stake_region (vertical scan area)
+            # Priority: stake_corners > legacy stake_region fields
+            stake_corners = calibration.get('stake_corners', {})
+            sc_tl = stake_corners.get('top_left')
+            sc_tr = stake_corners.get('top_right')
+            sc_bl = stake_corners.get('bottom_left')
+            sc_br = stake_corners.get('bottom_right')
+
+            if all([sc_tl, sc_tr, sc_bl, sc_br]):
+                # New format: compute bounding box from stake_corners quadrilateral
+                # But extend to include sample_bounds bottom if present (to capture snow line)
+                x = min(sc_tl[0], sc_bl[0])
+                y = min(sc_tl[1], sc_tr[1])
+                x_right = max(sc_tr[0], sc_br[0])
+                y_bottom = max(sc_bl[1], sc_br[1])
+
+                # If sample_bounds extends lower than stake_corners, include that area
+                if self.sample_bounds:
+                    y_bottom = max(y_bottom, sb_bl[1], sb_br[1])
+                    x = min(x, sb_tl[0], sb_bl[0])
+                    x_right = max(x_right, sb_tr[0], sb_br[0])
+
+                w = x_right - x
+                h = y_bottom - y
+                self.stake_region = (x, y, w, h)
+            elif all(calibration.get(k) is not None for k in ['base_region_x', 'base_region_y', 'base_region_width', 'base_region_height']):
                 self.stake_region = (
                     calibration['base_region_x'],
                     calibration['base_region_y'],
@@ -346,27 +455,47 @@ class SnowStakeMeasurer:
             full_width = image.shape[1]  # Width of the ROI
             full_height = image.shape[0]  # Height of the ROI
 
-            # Check if base_region is being used (samples span full base, not centered on stake)
-            has_base_region = all(self.calibration.get(k) is not None for k in
-                ['base_region_x', 'base_region_y', 'base_region_width', 'base_region_height'])
+            # Determine X range for sample lines
+            # Priority: stake_corners (actual stake width) > legacy methods
+            # sample_bounds is for visualization, stake_corners is for measurement
+            stake_corners = self.calibration.get('stake_corners', {})
+            sc_bl = stake_corners.get('bottom_left')
+            sc_br = stake_corners.get('bottom_right')
 
-            if has_base_region:
-                # base_region: Use full width (75% of it) centered on the ROI, not on stake
-                measure_width = int(self.stake_region[2] * 0.75)  # 75% of base region width
-                x_center = full_width // 2  # Center of the ROI (base_region)
-            elif 'stake_centerline_x' in self.calibration:
-                # stake_region with centerline: center on stake
-                centerline_x = self.calibration['stake_centerline_x'] - roi_x_offset
-                measure_width = int(self.stake_region[2] * 0.75)  # 75% of stake width
-                x_center = centerline_x
+            if sc_bl and sc_br:
+                # Use stake_corners for X range (where the actual stake is)
+                x_start = sc_bl[0] - roi_x_offset
+                x_end = sc_br[0] - roi_x_offset
+                actual_width = x_end - x_start
+            elif self.sample_bounds:
+                # Fall back to sample_bounds if no stake_corners
+                sb_bl = self.sample_bounds.get('bottom_left')
+                sb_br = self.sample_bounds.get('bottom_right')
+                x_start = sb_bl[0] - roi_x_offset
+                x_end = sb_br[0] - roi_x_offset
+                actual_width = x_end - x_start
             else:
-                # Fallback: center on ROI
-                measure_width = int(self.stake_region[2] * 0.75)
-                x_center = full_width // 2
+                # Check if base_region is being used (samples span full base, not centered on stake)
+                has_base_region = all(self.calibration.get(k) is not None for k in
+                    ['base_region_x', 'base_region_y', 'base_region_width', 'base_region_height'])
 
-            x_start = max(0, x_center - measure_width // 2)
-            x_end = min(full_width, x_center + measure_width // 2)
-            actual_width = x_end - x_start
+                if has_base_region:
+                    # base_region: Use full width (75% of it) centered on the ROI, not on stake
+                    measure_width = int(self.stake_region[2] * 0.75)  # 75% of base region width
+                    x_center = full_width // 2  # Center of the ROI (base_region)
+                elif 'stake_centerline_x' in self.calibration:
+                    # stake_region with centerline: center on stake
+                    centerline_x = self.calibration['stake_centerline_x'] - roi_x_offset
+                    measure_width = int(self.stake_region[2] * 0.75)  # 75% of stake width
+                    x_center = centerline_x
+                else:
+                    # Fallback: center on ROI
+                    measure_width = int(self.stake_region[2] * 0.75)
+                    x_center = full_width // 2
+
+                x_start = max(0, x_center - measure_width // 2)
+                x_end = min(full_width, x_center + measure_width // 2)
+                actual_width = x_end - x_start
 
             if actual_width < 10:
                 return None, None
@@ -396,7 +525,16 @@ class SnowStakeMeasurer:
             return None, None
 
         # Get calibration values for depth calculation
-        reference_y = self.calibration.get('reference_y') if self.calibration else None
+        reference_y = None
+        if self.calibration:
+            reference_y = self.calibration.get('reference_y')
+            # Fall back to marker_positions["0"] if no explicit reference_y
+            if reference_y is None:
+                marker_positions = self.calibration.get('marker_positions', {})
+                if '0' in marker_positions:
+                    reference_y = marker_positions['0']
+                elif 0 in marker_positions:
+                    reference_y = marker_positions[0]
         ppi = self.pixels_per_inch
 
         # Take 10 vertical samples evenly spaced across the measurement width
@@ -523,13 +661,10 @@ class SnowStakeMeasurer:
                 sample_data['snow_line_y'] = snow_line_y_full
                 sample_data['valid'] = True
 
-                # Calculate depth in inches if we have calibration
-                if reference_y and ppi:
-                    pixel_distance = reference_y - snow_line_y_full
-                    if pixel_distance > 0:
-                        sample_data['depth_inches'] = pixel_distance / ppi
-                    else:
-                        sample_data['depth_inches'] = 0.0
+                # Calculate depth in inches using y_to_inches (supports marker interpolation)
+                depth = self.y_to_inches(snow_line_y_full)
+                if depth is not None:
+                    sample_data['depth_inches'] = depth
             else:
                 sample_data['skip_reason'] = 'no_transition_found'
 
