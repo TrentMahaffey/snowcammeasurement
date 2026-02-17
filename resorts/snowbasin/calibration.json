@@ -1,0 +1,17 @@
+{
+  "resort": "snowbasin",
+  "enabled": false,
+  "image_prefix": "snowbasin",
+  "method": "linear",
+  "notes": "Uncalibrated - use frontend Grid button to find coordinates",
+  "stake_corners": {
+    "top_left": null,
+    "top_right": null,
+    "bottom_left": null,
+    "bottom_right": null
+  },
+  "marker_positions": {},
+  "pixels_per_inch": null,
+  "reference_y": null,
+  "min_depth_threshold": 1.0
+}

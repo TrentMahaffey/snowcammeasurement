@@ -27,6 +27,22 @@ import re
 import sqlite3
 import sys
 from datetime import datetime
+import numpy as np
+
+
+def _convert_numpy_types(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,21 +51,36 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DB_PATH = os.environ.get('SNOW_DB_PATH', '/out/snow_measurements.db')
 IMAGES_DIR = os.environ.get('SNOW_IMAGES_DIR', '/out')
 
-# Resort configurations
-RESORTS = {
-    'winter_park': {
-        'enabled': True,
-        'image_pattern': 'winter_park_*.jpg',
-        'measurer_module': 'resorts.winter_park.measurer',
-        'measurer_func': 'get_measurer',
-    },
-    'snowmass': {
-        'enabled': True,
-        'image_pattern': 'snowmass_*.jpg',
-        'measurer_module': 'snowcammeasurement.measurement',
-        'measurer_class': 'SnowStakeMeasurer',
-    },
-}
+# Resort configurations - loaded dynamically from resorts/ folder
+def load_resort_configs():
+    """Load resort configurations from resorts/ calibration files."""
+    import glob
+    resorts = {}
+
+    resorts_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'resorts')
+
+    for cal_file in glob.glob(os.path.join(resorts_dir, '*', 'calibration.json')):
+        try:
+            with open(cal_file) as f:
+                config = json.load(f)
+
+            resort_name = config.get('resort', os.path.basename(os.path.dirname(cal_file)))
+            image_prefix = config.get('image_prefix', resort_name)
+
+            resorts[resort_name] = {
+                'enabled': config.get('enabled', False),
+                'image_pattern': f'{image_prefix}_*.jpg',
+                'calibration_path': cal_file,
+                'has_custom_measurer': os.path.exists(
+                    os.path.join(os.path.dirname(cal_file), 'measurer.py')
+                ),
+            }
+        except Exception as e:
+            print(f"Error loading {cal_file}: {e}")
+
+    return resorts
+
+RESORTS = load_resort_configs()
 
 
 def get_existing_images(cursor, resort):
@@ -91,45 +122,85 @@ def extract_timestamp(image_path):
 
 def get_measurer(resort, resort_config):
     """Get the appropriate measurer for a resort."""
-    if resort == 'winter_park':
-        from resorts.winter_park.measurer import get_measurer as wp_get_measurer
-        return wp_get_measurer(db_path=DB_PATH)
-    elif resort == 'snowmass':
-        from snowcammeasurement.measurement import SnowStakeMeasurer
-        from snowcammeasurement.config import CalibrationManager
-        config_mgr = CalibrationManager()
-        calibration = config_mgr.get_calibration(resort)
-        return SnowStakeMeasurer(
-            pixels_per_inch=calibration.get('pixels_per_inch'),
-            debug=False
+    # Load calibration
+    with open(resort_config['calibration_path']) as f:
+        calibration = json.load(f)
+
+    # Check for custom measurer
+    if resort_config.get('has_custom_measurer'):
+        measurer_dir = os.path.dirname(resort_config['calibration_path'])
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"{resort}_measurer",
+            os.path.join(measurer_dir, 'measurer.py')
         )
-    else:
-        raise ValueError(f"Unknown resort: {resort}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        if hasattr(module, 'get_measurer'):
+            return module.get_measurer(db_path=DB_PATH, calibration=calibration)
+        elif hasattr(module, 'WinterParkMeasurer'):
+            return module.WinterParkMeasurer(calibration)
+
+    # Check if this resort uses marker interpolation (has marker_positions)
+    method = calibration.get('method', 'linear')
+    marker_positions = calibration.get('marker_positions', {})
+
+    if method == 'marker_interpolation' or marker_positions:
+        # Use WinterParkMeasurer for any resort with marker_positions
+        resorts_dir = os.path.dirname(resort_config['calibration_path'])
+        winter_park_dir = os.path.join(os.path.dirname(resorts_dir), 'winter_park')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "winter_park_measurer",
+            os.path.join(winter_park_dir, 'measurer.py')
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.WinterParkMeasurer(calibration)
+
+    # Fall back to generic measurer (requires pixels_per_inch)
+    from snowcammeasurement.measurement import SnowStakeMeasurer
+    return SnowStakeMeasurer(
+        pixels_per_inch=calibration.get('pixels_per_inch'),
+        reference_y=calibration.get('reference_y'),
+        debug=False
+    )
 
 
 def measure_image(measurer, image_path, resort):
     """Measure snow depth from an image."""
-    if resort == 'winter_park':
+    import cv2
+
+    # Check if measurer has measure_from_file (custom measurer)
+    if hasattr(measurer, 'measure_from_file'):
         result = measurer.measure_from_file(image_path)
         return {
             'snow_depth_inches': result.snow_depth_inches,
             'confidence_score': result.confidence_score,
-            'sample_data': json.dumps(result.samples) if result.samples else None,
-            'notes': result.notes,
+            'sample_data': json.dumps(_convert_numpy_types(result.samples)) if hasattr(result, 'samples') and result.samples else None,
+            'notes': getattr(result, 'notes', ''),
         }
     else:
         # Generic measurer interface
-        import cv2
         image = cv2.imread(image_path)
         if image is None:
             return None
         result = measurer.measure(image)
-        return {
-            'snow_depth_inches': result.get('snow_depth_inches'),
-            'confidence_score': result.get('confidence_score', 0.5),
-            'sample_data': None,
-            'notes': '',
-        }
+        if isinstance(result, dict):
+            return {
+                'snow_depth_inches': result.get('snow_depth_inches'),
+                'confidence_score': result.get('confidence_score', 0.5),
+                'sample_data': None,
+                'notes': result.get('notes', ''),
+            }
+        else:
+            return {
+                'snow_depth_inches': getattr(result, 'snow_depth_inches', None),
+                'confidence_score': getattr(result, 'confidence_score', 0.5),
+                'sample_data': None,
+                'notes': getattr(result, 'notes', ''),
+            }
 
 
 def process_resort(resort, resort_config, cursor, dry_run=False, verbose=False):

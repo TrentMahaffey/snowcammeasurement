@@ -548,15 +548,65 @@ class SnowStakeMeasurer:
         except:
             use_scipy = False
 
+        # Helper function to check if a region is snow-like (for pattern stopping)
+        def is_snow_region(check_y_full: int, sample_x_full: int) -> Tuple[bool, Dict]:
+            """Check if region above check_y is snow (white, uniform texture)."""
+            info = {'brightness': 0, 'color_diff': 0, 'texture_var': 0, 'saturation': 0}
+            # Convert to ROI coordinates
+            check_y_roi = check_y_full - roi_y_offset
+            sample_x_roi = sample_x_full - roi_x_offset
+
+            check_start = max(0, check_y_roi - 25)
+            check_end = max(0, check_y_roi - 5)
+            c_start = max(0, sample_x_roi - 5)
+            c_end = min(image.shape[1], sample_x_roi + 6)
+
+            if check_end <= check_start:
+                return True, info  # Can't check, assume snow
+
+            region = image[check_start:check_end, c_start:c_end]
+            if region.size == 0:
+                return True, info
+
+            avg_bgr = np.mean(region, axis=(0, 1))
+            b, g, r = avg_bgr[0], avg_bgr[1], avg_bgr[2]
+            max_diff = max(abs(r-g), abs(g-b), abs(r-b))
+            min_channel = min(r, g, b)
+
+            # Check saturation in HSV - snow should have low saturation
+            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+            avg_saturation = float(np.mean(hsv_region[:, :, 1]))
+
+            gray_reg = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+            texture_var = float(np.std(gray_reg))
+
+            info = {'brightness': float(min_channel), 'color_diff': float(max_diff),
+                    'texture_var': texture_var, 'saturation': avg_saturation}
+
+            # Reject if saturation is too high (colored background like red/salmon)
+            # Snow typically has saturation < 40, colored backgrounds > 50
+            if avg_saturation > 50:
+                return False, info
+
+            # Check if snow-like
+            if texture_var < 20:
+                return min_channel > 60 and max_diff < 60, info
+            elif texture_var < 45:
+                return min_channel > 100 and max_diff < 50, info
+            return False, info  # High texture = not snow
+
         for idx, sample_x in enumerate(sample_positions):
             # Extract vertical column (with small averaging window for noise reduction)
             col_start = max(0, sample_x - 2)
             col_end = min(actual_width, sample_x + 3)
             column = np.mean(gray_region[:, col_start:col_end], axis=1)
 
+            # Full image X coordinate for this sample
+            sample_x_full = int(roi_x_offset + x_start + sample_x)
+
             sample_data = {
                 'sample_index': int(idx),
-                'x_position': int(roi_x_offset + x_start + sample_x),  # Full image x coordinate
+                'x_position': sample_x_full,
                 'snow_line_y': None,
                 'depth_inches': None,
                 'valid': False,
@@ -617,6 +667,7 @@ class SnowStakeMeasurer:
                     continue
 
                 # Scan from reference point upward looking for transition from bright to dark
+                # Also check for non-snow regions (patterns/text) and stop there
                 snow_line_idx = None
                 consecutive_dark = 0
 
@@ -626,7 +677,20 @@ class SnowStakeMeasurer:
                     if smoothed[i] < threshold:
                         consecutive_dark += 1
                         if consecutive_dark >= 3:  # Found transition to darker (stake above snow)
-                            snow_line_idx = i + 2  # Adjust to snow surface
+                            candidate_idx = i + 2  # Adjust to snow surface
+                            candidate_y_full = int(roi_y_offset + candidate_idx)
+
+                            # Check if region below is snow-like (confirms this is snow boundary)
+                            check_below_y = int(roi_y_offset + min(candidate_idx + 20, region_height - 1))
+                            is_snow_below, _ = is_snow_region(check_below_y, sample_x_full)
+
+                            if is_snow_below:
+                                snow_line_idx = candidate_idx
+                                # Check if region above is non-snow (pattern/text boundary)
+                                is_snow_above, info = is_snow_region(candidate_y_full, sample_x_full)
+                                if not is_snow_above:
+                                    sample_data['stopped_at_pattern'] = True
+                                sample_data['texture_var'] = info.get('texture_var', 0)
                             break
                     else:
                         consecutive_dark = 0
@@ -650,7 +714,19 @@ class SnowStakeMeasurer:
                     if smoothed[i] < threshold:
                         consecutive_dark += 1
                         if consecutive_dark >= 5:
-                            snow_line_idx = i + 3
+                            candidate_idx = i + 3
+                            candidate_y_full = int(roi_y_offset + candidate_idx)
+
+                            # Check snow boundary
+                            check_below_y = int(roi_y_offset + min(candidate_idx + 20, region_height - 1))
+                            is_snow_below, _ = is_snow_region(check_below_y, sample_x_full)
+
+                            if is_snow_below:
+                                snow_line_idx = candidate_idx
+                                is_snow_above, info = is_snow_region(candidate_y_full, sample_x_full)
+                                if not is_snow_above:
+                                    sample_data['stopped_at_pattern'] = True
+                                sample_data['texture_var'] = info.get('texture_var', 0)
                             break
                     else:
                         consecutive_dark = 0

@@ -1,0 +1,22 @@
+services:
+  frontend:
+    image: python:3.11-slim
+    container_name: snow-frontend
+    restart: unless-stopped
+    working_dir: /app
+    command: >
+      bash -c "pip install -q flask opencv-python-headless scipy pandas &&
+               python3 -u /app/snowcammeasurement/frontend.py"
+    volumes:
+      - .:/app
+      - /home/trent/snowcamtimelapse/out:/out
+    expose:
+      - "5000"
+    environment:
+      TZ: "America/Denver"
+    networks:
+      - portfolio_default
+
+networks:
+  portfolio_default:
+    external: true

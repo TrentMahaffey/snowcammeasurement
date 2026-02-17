@@ -5,7 +5,10 @@ Snow depth analytics module for calculating accumulation statistics.
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
-from .db import SnowDatabase
+try:
+    from .db import SnowDatabase
+except ImportError:
+    from db import SnowDatabase
 
 
 class SnowAnalytics:

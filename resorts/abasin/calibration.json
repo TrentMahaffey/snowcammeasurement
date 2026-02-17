@@ -1,0 +1,68 @@
+{
+  "resort": "abasin",
+  "enabled": true,
+  "image_prefix": "abasin",
+  "method": "marker_interpolation",
+  "notes": "Uncalibrated - use frontend Grid button to find coordinates",
+  "stake_corners": {
+    "top_left": [
+      642,
+      91
+    ],
+    "top_right": [
+      682,
+      93
+    ],
+    "bottom_left": [
+      632,
+      643
+    ],
+    "bottom_right": [
+      672,
+      643
+    ]
+  },
+  "marker_positions": {
+    "18": 343,
+    "0": 651,
+    "2": 621,
+    "4": 592,
+    "6": 552,
+    "8": 517,
+    "10": 478,
+    "12": 449,
+    "14": 410,
+    "16": 373
+  },
+  "pixels_per_inch": null,
+  "reference_y": null,
+  "min_depth_threshold": 1.0,
+  "stake_axis": {
+    "top": [
+      660,
+      79
+    ],
+    "bottom": [
+      649,
+      645
+    ]
+  },
+  "sample_bounds": {
+    "top_left": [
+      455,
+      626
+    ],
+    "top_right": [
+      814,
+      629
+    ],
+    "bottom_left": [
+      418,
+      692
+    ],
+    "bottom_right": [
+      896,
+      696
+    ]
+  }
+}

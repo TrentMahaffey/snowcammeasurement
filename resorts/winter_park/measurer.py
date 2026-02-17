@@ -159,6 +159,7 @@ class WinterParkMeasurer:
 
         The stake is red with white numbers. Snow is white/bright.
         We look for the transition from bright (snow) to red (stake).
+        Sample lines start at 0" level and follow stake axis tilt.
 
         Returns:
             Tuple of (median_snow_line_y, list of sample measurements)
@@ -173,6 +174,23 @@ class WinterParkMeasurer:
         samples = []
 
         base_y = self.marker_positions.get(0, y + h)  # 0" marker position
+        img_h, img_w = image.shape[:2]
+
+        # Get stake axis for tilt calculation
+        stake_axis = self.calibration.get('stake_axis', {})
+        axis_top = stake_axis.get('top')
+        axis_bottom = stake_axis.get('bottom')
+
+        # Calculate stake tilt (dx per dy)
+        if axis_top and axis_bottom:
+            axis_dx = axis_bottom[0] - axis_top[0]  # X change
+            axis_dy = axis_bottom[1] - axis_top[1]  # Y change
+            # tilt_ratio: how much X changes per unit Y (positive = stake leans right going down)
+            tilt_ratio = axis_dx / axis_dy if axis_dy != 0 else 0
+            axis_center_x = (axis_top[0] + axis_bottom[0]) / 2
+        else:
+            tilt_ratio = 0
+            axis_center_x = self.centerline_x
 
         # Determine sample X positions
         if self.has_sample_bounds:
@@ -187,15 +205,36 @@ class WinterParkMeasurer:
         # Import here to avoid circular imports
         from scipy.ndimage import gaussian_filter1d
 
-        # Define Y scan range (from top of stake to base)
+        # Define Y scan range - start at 0" marker, scan upward to top of stake
         scan_top_y = y  # Top of stake region
-        scan_bottom_y = base_y  # 0" marker position
-        img_h, img_w = image.shape[:2]
+        scan_bottom_y = base_y  # 0" marker position (where samples START)
+
+        # For at_base detection, use sample_bounds corners if available
+        # The sample_bounds is a quadrilateral, so we need to interpolate edges per-sample
+        if self.has_sample_bounds:
+            sample_bounds = self.calibration.get('sample_bounds', {})
+            sb_tl = sample_bounds.get('top_left', [0, scan_top_y])
+            sb_tr = sample_bounds.get('top_right', [0, scan_top_y])
+            sb_bl = sample_bounds.get('bottom_left', [0, scan_bottom_y])
+            sb_br = sample_bounds.get('bottom_right', [0, scan_bottom_y])
+        else:
+            sb_tl = sb_tr = [0, scan_top_y]
+            sb_bl = sb_br = [0, scan_bottom_y]
 
         for idx, sample_x in enumerate(sample_x_positions):
+            # Calculate the 0" Y position for this sample's X (accounting for stake tilt)
+            # The 0" marker_position is at the stake centerline
+            # For samples away from centerline, adjust Y based on tilt
+            x_offset_from_axis = sample_x - axis_center_x
+            # Positive tilt_ratio means stake leans right going down
+            # So for a sample to the RIGHT of axis, its 0" level is HIGHER (lower Y)
+            sample_base_y = int(base_y - (x_offset_from_axis * tilt_ratio))
+            sample_base_y = max(scan_top_y + 10, min(img_h - 1, sample_base_y))
+
             sample_data = {
                 'sample_index': int(idx),
                 'x_position': int(sample_x),
+                'base_y': sample_base_y,  # Store where this sample starts (0" level)
                 'snow_line_y': None,
                 'depth_inches': None,
                 'valid': False,
@@ -203,29 +242,80 @@ class WinterParkMeasurer:
                 'skip_reason': None
             }
 
-            # Get vertical column from full image (3-pixel wide average)
-            col_start = max(0, sample_x - 1)
-            col_end = min(img_w, sample_x + 2)
-
-            # Extract column from scan_top to scan_bottom
-            gray_column = np.mean(
-                gray_full[scan_top_y:scan_bottom_y, col_start:col_end],
-                axis=1
-            ).astype(float)
-
-            if len(gray_column) < 10:
+            # For tilted stake scanning:
+            # Instead of vertical column, we sample along the tilted axis
+            # For each Y from base upward, calculate corresponding X
+            scan_length = sample_base_y - scan_top_y
+            if scan_length < 10:
                 sample_data['skip_reason'] = 'column_too_short'
                 samples.append(sample_data)
                 continue
+
+            # Build the tilted column by sampling along stake axis direction
+            gray_column = np.zeros(scan_length, dtype=float)
+            for i in range(scan_length):
+                # Y position (from top down)
+                curr_y = scan_top_y + i
+                # X position adjusted for tilt (relative to sample_base_y)
+                y_from_base = sample_base_y - curr_y
+                x_shift = int(y_from_base * tilt_ratio)
+                curr_x = sample_x - x_shift  # Shift X based on how far from base
+
+                # Sample 3-pixel wide average at this tilted position
+                col_start = max(0, curr_x - 1)
+                col_end = min(img_w, curr_x + 2)
+                if col_end > col_start and 0 <= curr_y < img_h:
+                    gray_column[i] = np.mean(gray_full[curr_y, col_start:col_end])
 
             # Smooth the column
             gray_smoothed = gaussian_filter1d(gray_column, sigma=3)
             column_height = len(gray_smoothed)
 
-            # Use gradient-based detection
+            # Helper function to check if a region is snow-like
+            def is_snow_region(check_y: int) -> Tuple[bool, Dict]:
+                """Check if region above check_y is snow (white, uniform texture).
+                   X position is adjusted for stake tilt at check_y."""
+                info = {'brightness': 0, 'color_diff': 0, 'texture_var': 0}
+                check_start = max(0, check_y - 25)
+                check_end = max(0, check_y - 5)
+
+                # Calculate tilted X position at check_y
+                y_from_base = sample_base_y - check_y
+                x_shift = int(y_from_base * tilt_ratio)
+                tilted_x = sample_x - x_shift
+
+                c_start = max(0, tilted_x - 5)
+                c_end = min(img_w, tilted_x + 6)
+
+                if check_end <= check_start:
+                    return True, info  # Can't check, assume snow
+
+                region = image[check_start:check_end, c_start:c_end]
+                if region.size == 0:
+                    return True, info
+
+                avg_bgr = np.mean(region, axis=(0, 1))
+                b, g, r = avg_bgr[0], avg_bgr[1], avg_bgr[2]
+                max_diff = max(abs(r-g), abs(g-b), abs(r-b))
+                min_channel = min(r, g, b)
+
+                gray_reg = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+                texture_var = float(np.std(gray_reg))
+
+                info = {'brightness': float(min_channel), 'color_diff': float(max_diff), 'texture_var': texture_var}
+
+                # Check if snow-like
+                if texture_var < 20:
+                    return min_channel > 60 and max_diff < 60, info
+                elif texture_var < 45:
+                    return min_channel > 100 and max_diff < 50, info
+                return False, info  # High texture = not snow
+
+            # Use gradient-based detection with snow boundary checking
             gradient = np.gradient(gray_smoothed)
             gradient_threshold = 3.0
             snow_line_idx = None
+            snow_check_info = {}
 
             # Scan from bottom (base) upward looking for brightness transition
             for i in range(column_height - 2, max(10, int(column_height * 0.1)), -1):
@@ -236,20 +326,47 @@ class WinterParkMeasurer:
                     brightness_change = abs(gray_smoothed[window_start] - gray_smoothed[window_end])
 
                     if brightness_change > 15:
-                        snow_line_idx = i
-                        sample_data['contrast'] = float(brightness_change)
-                        break
+                        # Found a gradient - this is a candidate snow line
+                        candidate_y = int(scan_top_y + i)
+                        is_snow, info = is_snow_region(candidate_y)
+
+                        # Check if the region BELOW this gradient is snow-like
+                        # The snow line is where we transition from snow to non-snow
+                        check_below_y = int(scan_top_y + min(i + 20, column_height - 1))
+                        is_snow_below, _ = is_snow_region(check_below_y)
+
+                        if is_snow_below:
+                            # Region below is snow, this could be our snow line
+                            snow_line_idx = i
+                            snow_check_info = info
+                            sample_data['contrast'] = float(brightness_change)
+
+                            if not is_snow:
+                                # Region above is NOT snow - confirmed snow line boundary
+                                sample_data['stopped_at_pattern'] = True
+                            break  # Take first valid gradient with snow below
 
             # Fallback: absolute brightness threshold
             if snow_line_idx is None:
                 max_brightness = np.max(gray_smoothed[:int(column_height * 0.8)])
-                if max_brightness > 50:  # Ensure there's something bright
+                if max_brightness > 50:
                     brightness_threshold = max_brightness * 0.6
                     for i in range(column_height - 1, -1, -1):
                         if gray_smoothed[i] > brightness_threshold:
-                            snow_line_idx = i
-                            sample_data['contrast'] = float(gray_smoothed[i])
-                            break
+                            candidate_y = int(scan_top_y + i)
+                            is_snow, info = is_snow_region(candidate_y)
+
+                            # For fallback, just check if this position looks like snow boundary
+                            check_below_y = int(scan_top_y + min(i + 20, column_height - 1))
+                            is_snow_below, _ = is_snow_region(check_below_y)
+
+                            if is_snow_below:
+                                snow_line_idx = i
+                                snow_check_info = info
+                                sample_data['contrast'] = float(gray_smoothed[i])
+                                if not is_snow:
+                                    sample_data['stopped_at_pattern'] = True
+                                break
 
             if snow_line_idx is None:
                 sample_data['skip_reason'] = 'no_transition_found'
@@ -260,7 +377,48 @@ class WinterParkMeasurer:
             snow_line_y_full = int(scan_top_y + snow_line_idx)
             sample_data['snow_line_y'] = snow_line_y_full
             sample_data['depth_inches'] = float(self.y_to_inches(snow_line_y_full))
-            sample_data['valid'] = True
+
+            # Calculate tilted X position at the snow line Y
+            y_from_base_at_snow = sample_base_y - snow_line_y_full
+            x_shift_at_snow = int(y_from_base_at_snow * tilt_ratio)
+            snow_line_x = sample_x - x_shift_at_snow
+            sample_data['snow_line_x'] = snow_line_x  # X at the detected snow line
+            sample_data['tilt_ratio'] = tilt_ratio  # Store tilt for visualization
+
+            # Store the snow check info
+            sample_data['above_brightness'] = snow_check_info.get('brightness', 0)
+            sample_data['color_diff'] = snow_check_info.get('color_diff', 0)
+            sample_data['texture_var'] = snow_check_info.get('texture_var', 0)
+
+            # Check if sample detected at base or extends full height (platform edge)
+            # The sample_bounds is a quadrilateral, so interpolate edges at this sample's X
+            t = idx / (num_samples - 1) if num_samples > 1 else 0.5
+            sample_top_y_at_x = int(sb_tl[1] + t * (sb_tr[1] - sb_tl[1]))
+            sample_bottom_y_at_x = int(sb_bl[1] + t * (sb_br[1] - sb_bl[1]))
+
+            base_threshold = 15  # Within 15 pixels of interpolated bottom edge
+            sample_height = sample_bottom_y_at_x - sample_top_y_at_x
+            line_height = sample_bottom_y_at_x - snow_line_y_full
+
+            # Check against both sample_bounds bottom AND the 0" marker position
+            zero_marker_y = self.marker_positions.get(0, base_y)
+            at_sample_base = snow_line_y_full >= (sample_bottom_y_at_x - base_threshold)
+            at_zero_marker = snow_line_y_full >= (zero_marker_y - base_threshold)
+
+            if at_sample_base or at_zero_marker:
+                # Sample detected at the base - no snow
+                sample_data['valid'] = False
+                sample_data['skip_reason'] = 'at_base'
+                sample_data['depth_inches'] = 0.0
+            elif (snow_line_y_full >= sample_top_y_at_x and
+                  sample_height > 0 and
+                  (line_height / sample_height) > 0.92):
+                # Sample detection is INSIDE sample_bounds AND spans >92% height
+                # This is likely detecting platform edge, not actual snow
+                sample_data['valid'] = False
+                sample_data['skip_reason'] = 'at_base'
+            else:
+                sample_data['valid'] = True
 
             samples.append(sample_data)
 
@@ -279,9 +437,9 @@ class WinterParkMeasurer:
 
         filtered = candidates[(candidates >= lower_bound) & (candidates <= upper_bound)]
 
-        # Mark outliers
+        # Mark outliers (but don't overwrite existing skip reasons like at_base)
         for s in samples:
-            if s['snow_line_y'] is not None:
+            if s['snow_line_y'] is not None and not s.get('skip_reason'):
                 if s['snow_line_y'] < lower_bound or s['snow_line_y'] > upper_bound:
                     s['valid'] = False
                     s['skip_reason'] = 'iqr_outlier'

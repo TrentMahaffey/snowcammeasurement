@@ -9,6 +9,22 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 
+def _convert_numpy_types(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: _convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 class SnowDatabase:
     """Manages SQLite database for snow depth measurements."""
 
@@ -264,7 +280,7 @@ class SnowDatabase:
                 depth_min = min(depths)
                 depth_max = max(depths)
                 depth_avg = sum(depths) / len(depths)
-            sample_json = json.dumps(sample_data)
+            sample_json = json.dumps(_convert_numpy_types(sample_data))
 
         with self._get_connection() as conn:
             cursor = conn.cursor()

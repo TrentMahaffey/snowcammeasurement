@@ -15,6 +15,22 @@ import cv2
 import numpy as np
 from io import BytesIO
 
+
+def _convert_numpy_types(obj):
+    """Recursively convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, (np.integer,)):
+        return int(obj)
+    elif isinstance(obj, (np.floating,)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 app = Flask(__name__)
 
 # Configuration
@@ -421,11 +437,29 @@ HTML_TEMPLATE = '''
             top: 50%;
             transform: translate(-50%, -50%);
         }
+        .mouse-position {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #00ff00;
+            padding: 8px 12px;
+            font-family: monospace;
+            font-size: 14px;
+            border-radius: 4px;
+            pointer-events: none;
+            z-index: 100;
+        }
         .remeasure-btn { background: #5a3d4e; }
         .remeasure-btn:hover { background: #6a4d5e; }
         .regions-btn { background: #3d5a4e; }
         .regions-btn:hover { background: #4d6a5e; }
         .regions-btn.active { background: #5db86b; }
+        .inches-btn.active { background: #9b59b6; }
+        .samples-btn.active { background: #3498db; }
+        .region-btn.active { background: #e67e22; }
+        .stake-btn.active { background: #e74c3c; }
+        .base-btn.active { background: #27ae60; }
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -556,12 +590,16 @@ HTML_TEMPLATE = '''
     <div class="header">
         <h1>❄️ Snow Depth Measurements</h1>
         <div class="controls">
-            <select id="resort" onchange="loadData()">
+            <select id="resort" onchange="onResortChange()">
                 {% for r in resorts %}
-                <option value="{{ r }}" {% if r == resort %}selected{% endif %}>{{ r.title() }}</option>
+                <option value="{{ r }}" {% if r == resort %}selected{% endif %}>{{ r.replace('_', ' ').title() }}</option>
                 {% endfor %}
             </select>
-            <input type="date" id="date" value="{{ date }}" onchange="loadData()">
+            <select id="date" onchange="loadData()">
+                {% for d in available_dates %}
+                <option value="{{ d }}" {% if d == date %}selected{% endif %}>{{ d }}</option>
+                {% endfor %}
+            </select>
             <button onclick="loadData()">Refresh</button>
         </div>
     </div>
@@ -584,12 +622,17 @@ HTML_TEMPLATE = '''
                     {% endif %}
                 </div>
                 <div id="click-marker" class="click-marker" style="display: none;"></div>
+                <div id="mouse-position" class="mouse-position" style="display: none;">X: 0, Y: 0</div>
             </div>
             <div class="nav-buttons">
                 <button class="nav-btn" onclick="prevImage()">← Previous Hour</button>
                 <button class="nav-btn" onclick="nextImage()">Next Hour →</button>
                 <button class="nav-btn grid-btn" id="grid-btn" onclick="toggleGrid()">Grid</button>
-                <button class="nav-btn regions-btn" id="regions-btn" onclick="toggleRegions()">Regions</button>
+                <button class="nav-btn inches-btn active" id="inches-btn" onclick="toggleInches()">Inches</button>
+                <button class="nav-btn samples-btn active" id="samples-btn" onclick="toggleSamples()">Samples</button>
+                <button class="nav-btn region-btn active" id="region-btn" onclick="toggleRegion()">Region</button>
+                <button class="nav-btn stake-btn" id="stake-btn" onclick="toggleStake()">Stake</button>
+                <button class="nav-btn base-btn" id="base-btn" onclick="toggleBase()">Base</button>
                 <button class="nav-btn calibrate-btn" id="calibrate-btn" onclick="toggleCalibrationMode()">Calibrate</button>
                 <button class="nav-btn remeasure-btn" onclick="remeasureThis()">Re-measure This</button>
             </div>
@@ -819,6 +862,11 @@ HTML_TEMPLATE = '''
         let minDepthThreshold = {{ calibration.min_depth_threshold }};
         let showGrid = false;
         let showRegions = false;
+        let showInches = true;
+        let showSamples = true;
+        let showRegion = true;
+        let showStake = false;
+        let showBase = false;
 
         function toggleGrid() {
             showGrid = !showGrid;
@@ -835,6 +883,61 @@ HTML_TEMPLATE = '''
             showRegions = !showRegions;
             const btn = document.getElementById('regions-btn');
             if (showRegions) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+            updateDisplay();
+        }
+
+        function toggleInches() {
+            showInches = !showInches;
+            const btn = document.getElementById('inches-btn');
+            if (showInches) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+            updateDisplay();
+        }
+
+        function toggleSamples() {
+            showSamples = !showSamples;
+            const btn = document.getElementById('samples-btn');
+            if (showSamples) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+            updateDisplay();
+        }
+
+        function toggleRegion() {
+            showRegion = !showRegion;
+            const btn = document.getElementById('region-btn');
+            if (showRegion) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+            updateDisplay();
+        }
+
+        function toggleStake() {
+            showStake = !showStake;
+            const btn = document.getElementById('stake-btn');
+            if (showStake) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+            updateDisplay();
+        }
+
+        function toggleBase() {
+            showBase = !showBase;
+            const btn = document.getElementById('base-btn');
+            if (showBase) {
                 btn.classList.add('active');
             } else {
                 btn.classList.remove('active');
@@ -867,6 +970,11 @@ HTML_TEMPLATE = '''
             let imgUrl = '/image/' + resort + '/' + m.image + '?t=' + Date.now();
             if (showGrid) imgUrl += '&grid=true';
             if (showRegions) imgUrl += '&regions=true';
+            if (!showInches) imgUrl += '&inches=false';
+            if (!showSamples) imgUrl += '&samples=false';
+            if (!showRegion) imgUrl += '&region=false';
+            if (showStake) imgUrl += '&stake=true';
+            if (showBase) imgUrl += '&base=true';
             document.getElementById('main-image').src = imgUrl;
             document.getElementById('depth-value').textContent = m.depth;
             document.getElementById('timestamp').textContent = m.time;
@@ -957,6 +1065,46 @@ HTML_TEMPLATE = '''
             const resort = document.getElementById('resort').value;
             const date = document.getElementById('date').value;
             window.location.href = '/?resort=' + resort + '&date=' + date;
+        }
+
+        function onResortChange() {
+            const resort = document.getElementById('resort').value;
+            const dateSelect = document.getElementById('date');
+
+            // Fetch available dates for the new resort
+            fetch('/api/dates/' + resort)
+                .then(response => response.json())
+                .then(data => {
+                    // Clear existing options
+                    dateSelect.innerHTML = '';
+
+                    // Add new options
+                    const dates = data.dates || [];
+                    if (dates.length === 0) {
+                        // No dates available, add today as default
+                        const today = new Date().toISOString().split('T')[0];
+                        const option = document.createElement('option');
+                        option.value = today;
+                        option.text = today;
+                        dateSelect.appendChild(option);
+                    } else {
+                        dates.forEach((date, index) => {
+                            const option = document.createElement('option');
+                            option.value = date;
+                            option.text = date;
+                            if (index === 0) option.selected = true;
+                            dateSelect.appendChild(option);
+                        });
+                    }
+
+                    // Navigate to the new resort with the selected date
+                    loadData();
+                })
+                .catch(error => {
+                    console.error('Error fetching dates:', error);
+                    // Fall back to just navigating with current date
+                    loadData();
+                });
         }
 
         function loadDailySummary() {
@@ -1569,6 +1717,40 @@ HTML_TEMPLATE = '''
             }
         });
 
+        // Mouse position display in grid mode
+        document.querySelector('.image-container').addEventListener('mousemove', function(e) {
+            const posDisplay = document.getElementById('mouse-position');
+            if (!showGrid) {
+                posDisplay.style.display = 'none';
+                return;
+            }
+
+            const img = document.getElementById('main-image');
+            const rect = img.getBoundingClientRect();
+
+            // Calculate position relative to image
+            const relX = e.clientX - rect.left;
+            const relY = e.clientY - rect.top;
+
+            // Scale to original image coordinates
+            const scaleX = originalImageWidth / rect.width;
+            const scaleY = originalImageHeight / rect.height;
+            const imgX = Math.round(relX * scaleX);
+            const imgY = Math.round(relY * scaleY);
+
+            // Only show if within image bounds
+            if (relX >= 0 && relX <= rect.width && relY >= 0 && relY <= rect.height) {
+                posDisplay.textContent = 'X: ' + imgX + ', Y: ' + imgY;
+                posDisplay.style.display = 'block';
+            } else {
+                posDisplay.style.display = 'none';
+            }
+        });
+
+        document.querySelector('.image-container').addEventListener('mouseleave', function() {
+            document.getElementById('mouse-position').style.display = 'none';
+        });
+
         // ============ Re-measure Current Image ============
         function remeasureThis() {
             const m = measurements[currentIndex];
@@ -1581,8 +1763,20 @@ HTML_TEMPLATE = '''
                 return;
             }
 
-            fetch('/api/remeasure_single/' + resort + '/' + m.id, {
-                method: 'POST'
+            // Use different endpoint for filesystem images (uncalibrated resorts)
+            let url;
+            if (String(m.id).startsWith('img_')) {
+                // Filesystem image - use measure_image endpoint with image filename
+                url = '/api/measure_image/' + resort + '/' + m.image;
+            } else {
+                // Database measurement - use remeasure_single endpoint
+                url = '/api/remeasure_single/' + resort + '/' + m.id;
+            }
+
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({})
             })
             .then(response => response.json())
             .then(data => {
@@ -1839,6 +2033,127 @@ def get_resorts():
     return sorted(resorts) if resorts else ['snowmass']
 
 
+def get_available_dates(resort):
+    """Get list of dates that have images for a resort (from DB or filesystem)."""
+    from datetime import datetime, timedelta
+    import glob
+    import re
+
+    dates = set()
+
+    # First check database for measurement dates
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT DISTINCT DATE(timestamp, '-7 hours') as mst_date
+            FROM snow_measurements
+            WHERE resort = ?
+            ORDER BY mst_date DESC
+        ''', (resort,))
+        for row in cursor.fetchall():
+            if row[0]:
+                dates.add(row[0])
+        conn.close()
+    except:
+        pass
+
+    # Also check filesystem for images
+    calibration = get_calibration(resort)
+    image_prefix = calibration.get('image_prefix', resort)
+
+    # Find all images for this resort
+    pattern = os.path.join(OUT_DIR, f"{image_prefix}_*.jpg")
+    for img_path in glob.glob(pattern):
+        basename = os.path.basename(img_path)
+        match = re.search(r'_(\d{8})_(\d{6})\.jpg$', basename)
+        if match:
+            date_str = match.group(1)
+            hour = int(match.group(2)[:2])
+            # Convert UTC to MST date
+            utc_date = datetime.strptime(date_str, '%Y%m%d')
+            # If hour < 7, the MST date is the previous day
+            if hour < 7:
+                mst_date = utc_date - timedelta(days=1)
+            else:
+                mst_date = utc_date
+            dates.add(mst_date.strftime('%Y-%m-%d'))
+
+    # Return sorted dates (most recent first), limit to last 90 days
+    sorted_dates = sorted(dates, reverse=True)
+    return sorted_dates[:90]
+
+
+def get_images_from_filesystem(resort, date_str):
+    """Get available images from filesystem for a resort on a date (fallback for uncalibrated resorts)."""
+    from datetime import datetime, timedelta
+    import glob
+    import re
+
+    # Get image prefix from calibration
+    calibration = get_calibration(resort)
+    image_prefix = calibration.get('image_prefix', resort)
+
+    # MST date to UTC: look for files from UTC date 07:00 to next day 06:59
+    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+
+    # Pattern for hourly images on this UTC date and next
+    patterns = [
+        os.path.join(OUT_DIR, f"{image_prefix}_{date_str.replace('-', '')}*.jpg"),
+        os.path.join(OUT_DIR, f"{image_prefix}_{(date_obj + timedelta(days=1)).strftime('%Y%m%d')}*.jpg"),
+    ]
+
+    all_images = []
+    for pattern in patterns:
+        all_images.extend(glob.glob(pattern))
+
+    # Filter to hourly images and convert to MST
+    measurements = []
+    seen_hours = set()
+
+    for img_path in sorted(all_images):
+        basename = os.path.basename(img_path)
+        # Extract timestamp: prefix_YYYYMMDD_HHMMSS.jpg
+        match = re.search(r'_(\d{8})_(\d{2})(\d{2})(\d{2})\.jpg$', basename)
+        if not match:
+            continue
+
+        date_part, hour, minute, second = match.groups()
+        # Only take first image of each hour (minute 00-01)
+        if minute not in ('00', '01'):
+            continue
+
+        # Parse UTC timestamp
+        ts_utc = datetime.strptime(f"{date_part}_{hour}{minute}{second}", "%Y%m%d_%H%M%S")
+        # Convert to MST
+        ts_mst = ts_utc - timedelta(hours=7)
+
+        # Check if this MST date matches requested date
+        if ts_mst.strftime('%Y-%m-%d') != date_str:
+            continue
+
+        # Skip if we already have this hour
+        hour_key = ts_mst.strftime('%H')
+        if hour_key in seen_hours:
+            continue
+        seen_hours.add(hour_key)
+
+        measurements.append({
+            'id': f'img_{basename}',
+            'time': ts_mst.strftime('%Y-%m-%d %H:%M'),
+            'hour': hour_key,
+            'depth': 'N/A',
+            'depth_num': 0,
+            'confidence': 0,
+            'image': basename,
+            'class': 'no-data',
+            'is_outlier': False,
+            'outlier_reason': None
+        })
+
+    return sorted(measurements, key=lambda x: x['hour'])
+
+
 def get_measurements(resort, date_str):
     """Get measurements for a resort on a specific date (in MST)."""
     conn = get_db_connection()
@@ -1863,6 +2178,10 @@ def get_measurements(resort, date_str):
 
     rows = cursor.fetchall()
     conn.close()
+
+    # If no measurements, fall back to filesystem images
+    if not rows:
+        return get_images_from_filesystem(resort, date_str)
 
     measurements = []
     prev_depth = None
@@ -1956,6 +2275,7 @@ def index():
     date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
 
     resorts = get_resorts()
+    available_dates = get_available_dates(resort)
     measurements = get_measurements(resort, date_str)
     calibration = get_calibration(resort)
     stats = calculate_stats(measurements)
@@ -1966,13 +2286,15 @@ def index():
         if m['depth_num'] > 0:
             current_index = i
 
-    # Format calibration for display
+    # Format calibration for display (handle None values)
+    ppi = calibration.get('pixels_per_inch')
+    tilt = calibration.get('tilt_angle')
     cal_display = {
-        'ppi': f"{calibration.get('pixels_per_inch', 0):.2f}",
-        'ref_y': calibration.get('reference_y', 'N/A'),
-        'tilt': f"{calibration.get('tilt_angle', 0):.1f}",
+        'ppi': f"{ppi:.2f}" if ppi is not None else "N/A",
+        'ref_y': calibration.get('reference_y') or 'N/A',
+        'tilt': f"{tilt:.1f}" if tilt is not None else "0.0",
         'region': f"{calibration.get('stake_region_x', '?')},{calibration.get('stake_region_y', '?')}",
-        'min_depth_threshold': calibration.get('min_depth_threshold', 1.0)
+        'min_depth_threshold': calibration.get('min_depth_threshold') or 1.0
     }
 
     current_measurement = measurements[current_index] if measurements else {
@@ -1985,6 +2307,7 @@ def index():
         resort=resort,
         resorts=resorts,
         date=date_str,
+        available_dates=available_dates,
         measurements=measurements,
         measurements_json=json.dumps(measurements),
         stats=stats,
@@ -2130,7 +2453,36 @@ def serve_image(resort, filename):
         # Blend overlay with original image (50% opacity)
         cv2.addWeighted(overlay, 0.5, image, 0.5, 0, image)
 
-    # Draw calibration overlay if available
+    # Check which overlays should be shown
+    show_inches = request.args.get('inches', 'true').lower() != 'false'
+    show_samples = request.args.get('samples', 'true').lower() != 'false'
+    show_region = request.args.get('region', 'true').lower() != 'false'
+    show_stake = request.args.get('stake', 'false').lower() == 'true'
+    show_base = request.args.get('base', 'false').lower() == 'true'
+
+    # Draw stake boundary if requested (orange)
+    if calibration and show_stake:
+        stake_corners = calibration.get('stake_corners', {})
+        sc_tl = stake_corners.get('top_left')
+        sc_tr = stake_corners.get('top_right')
+        sc_bl = stake_corners.get('bottom_left')
+        sc_br = stake_corners.get('bottom_right')
+        if all([sc_tl, sc_tr, sc_bl, sc_br]):
+            pts_stake = np.array([sc_tl, sc_tr, sc_br, sc_bl], np.int32)
+            cv2.polylines(image, [pts_stake], True, (0, 165, 255), 3)  # Orange
+
+    # Draw base/sample boundary if requested (green)
+    if calibration and show_base:
+        sample_bounds = calibration.get('sample_bounds', {})
+        sb_tl = sample_bounds.get('top_left')
+        sb_tr = sample_bounds.get('top_right')
+        sb_bl = sample_bounds.get('bottom_left')
+        sb_br = sample_bounds.get('bottom_right')
+        if all([sb_tl, sb_tr, sb_bl, sb_br]):
+            pts_base = np.array([sb_tl, sb_tr, sb_br, sb_bl], np.int32)
+            cv2.polylines(image, [pts_base], True, (0, 255, 0), 3)  # Green
+
+    # Draw calibration markers
     if calibration:
         import math
 
@@ -2240,7 +2592,8 @@ def serve_image(resort, filename):
                     [measure_x + measure_width, y + h],
                     [measure_x, y + h]
                 ], np.int32)
-                cv2.polylines(image, [pts_measure], True, (255, 100, 0), 2)
+                if show_region:
+                    cv2.polylines(image, [pts_measure], True, (255, 100, 0), 2)
 
                 # Draw 10 vertical sample lines (matching the measurement algorithm)
                 # Each line stops at its own detected snow line
@@ -2266,22 +2619,50 @@ def serve_image(resort, filename):
                     base_right_y = base_y
 
                 # If we have sample data from database, use individual snow lines
-                if sample_data and len(sample_data) == num_samples:
+                if sample_data and len(sample_data) == num_samples and show_samples:
+                    # Get stake_axis for tilt calculation (if available)
+                    stake_axis = calibration.get('stake_axis', {})
+                    axis_top = stake_axis.get('top')
+                    axis_bottom = stake_axis.get('bottom')
+                    if axis_top and axis_bottom:
+                        axis_dx = axis_bottom[0] - axis_top[0]
+                        axis_dy = axis_bottom[1] - axis_top[1]
+                        default_tilt = axis_dx / axis_dy if axis_dy != 0 else 0
+                    else:
+                        default_tilt = 0
+
                     for i, sample in enumerate(sample_data):
-                        # Calculate X position along the base (sample_bounds bottom edge)
-                        # Interpolate between left and right edges
-                        t_x = i / (num_samples - 1) if num_samples > 1 else 0.5
-                        base_x = int(base_left_x + t_x * (base_right_x - base_left_x))
-                        base_y_at_x = int(base_left_y + t_x * (base_right_y - base_left_y))
+                        # Get sample's X position from measurement data or calculate
+                        sample_x_position = sample.get('x_position')
+                        if sample_x_position is None:
+                            # Fallback: interpolate along base
+                            t_x = i / (num_samples - 1) if num_samples > 1 else 0.5
+                            sample_x_position = int(base_left_x + t_x * (base_right_x - base_left_x))
+
+                        # Get base Y for this sample (0" level, accounting for stake tilt)
+                        # Use sample's stored base_y if available, otherwise use ref_y
+                        sample_base_y = sample.get('base_y')
+                        if sample_base_y is None:
+                            sample_base_y = ref_y if ref_y else base_y
 
                         sample_snow_y = sample.get('snow_line_y')
+                        sample_snow_x = sample.get('snow_line_x')  # Tilted X at snow line
                         sample_depth = sample.get('depth_inches')
                         sample_valid = sample.get('valid', False)
                         sample_skip = sample.get('skip_reason')
+                        tilt_ratio = sample.get('tilt_ratio', default_tilt)
 
-                        # Default to reference_y (base) if no snow line detected
+                        # Default snow line position if not detected
                         if sample_snow_y is None:
-                            sample_snow_y = ref_y if ref_y else base_y_at_x
+                            sample_snow_y = sample_base_y  # Stay at base
+
+                        # Calculate tilted X at snow line if not provided
+                        if sample_snow_x is None and tilt_ratio != 0:
+                            y_from_base = sample_base_y - sample_snow_y
+                            x_shift = int(y_from_base * tilt_ratio)
+                            sample_snow_x = sample_x_position - x_shift
+                        elif sample_snow_x is None:
+                            sample_snow_x = sample_x_position  # Vertical line
 
                         # Choose color based on validity
                         if sample_valid:
@@ -2291,23 +2672,24 @@ def serve_image(resort, filename):
                         else:
                             line_color = (100, 100, 100) # Gray for no data
 
-                        # Draw line from base (sample_bounds bottom) UP to snow line
+                        # Draw TILTED line from base (0" level) UP to snow line
+                        # Line follows stake axis direction
                         cv2.line(image,
-                            (base_x, base_y_at_x),
-                            (base_x, sample_snow_y),
+                            (sample_x_position, sample_base_y),  # Start at 0" level
+                            (sample_snow_x, sample_snow_y),       # End at snow line (tilted X)
                             line_color, 2)
 
-                        # Draw sample number label at base
+                        # Draw sample number label at base (0" level)
                         num_label = str(i + 1)
-                        num_x = base_x - 5
-                        num_y = base_y_at_x + 18
+                        num_x = sample_x_position - 5
+                        num_y = sample_base_y + 18
                         cv2.putText(image, num_label, (num_x, num_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
                         # Draw small depth label at snow line (only for valid samples)
                         if sample_depth is not None and sample_valid:
                             label_text = f"{sample_depth:.1f}"
-                            label_x = base_x - 15
+                            label_x = sample_snow_x - 15
                             label_y = sample_snow_y - 8
                             # Draw small background
                             (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
@@ -2364,7 +2746,7 @@ def serve_image(resort, filename):
             cv2.putText(img, text, (tx, ty), font, font_scale, (0, 0, 0), thickness + 2)  # Outline
             cv2.putText(img, text, (tx, ty), font, font_scale, color, thickness)  # Main text
 
-        if x and w:
+        if x and w and show_inches:
             # For tilted lines: left point and right point have different Y values
             # dy across the width = w * tan(tilt)
             dy_across_width = int(w * dx_per_dy)
@@ -2502,6 +2884,16 @@ def api_daily_summary(resort, date):
         return jsonify({'error': str(e)})
 
 
+@app.route('/api/dates/<resort>')
+def api_get_dates(resort):
+    """API endpoint to get available dates for a resort."""
+    try:
+        dates = get_available_dates(resort)
+        return jsonify({'dates': dates})
+    except Exception as e:
+        return jsonify({'error': str(e), 'dates': []})
+
+
 @app.route('/api/calibration/<resort>', methods=['GET'])
 def api_get_calibration(resort):
     """Get calibration for a resort, optionally for a specific timestamp."""
@@ -2614,6 +3006,12 @@ def api_save_calibration(resort):
             merged.update(config)
             config = merged
 
+        # Auto-enable if calibration has valid marker_positions
+        marker_positions = config.get('marker_positions', {})
+        if marker_positions and len(marker_positions) >= 5:
+            config['enabled'] = True
+            config['method'] = 'marker_interpolation'
+
         db = SnowDatabase(DB_PATH)
         cal_id = db.save_calibration_version(
             resort=resort,
@@ -2652,22 +3050,27 @@ def api_calibration_history(resort):
 def get_measurer_for_resort(resort, calibration):
     """Get the appropriate measurer for a resort.
 
-    Uses custom measurer if available (e.g., WinterParkMeasurer for winter_park),
-    otherwise falls back to base SnowStakeMeasurer.
+    Uses marker interpolation measurer for resorts with marker_positions,
+    otherwise falls back to base SnowStakeMeasurer with pixels_per_inch.
     """
     from measurement import SnowStakeMeasurer
 
-    # Try to load resort-specific measurer
-    if resort == 'winter_park':
+    # Check if this resort uses marker interpolation (has marker_positions)
+    method = calibration.get('method', 'linear')
+    marker_positions = calibration.get('marker_positions', {})
+
+    if method == 'marker_interpolation' or marker_positions:
         try:
             import sys
-            sys.path.insert(0, '/app/resorts/winter_park')
+            if '/app/resorts/winter_park' not in sys.path:
+                sys.path.insert(0, '/app/resorts/winter_park')
             from measurer import WinterParkMeasurer
+            # WinterParkMeasurer works for any resort with marker_positions
             return WinterParkMeasurer(calibration)
         except Exception as e:
-            print(f"Could not load WinterParkMeasurer: {e}, using base measurer")
+            print(f"Could not load marker interpolation measurer: {e}, using base measurer")
 
-    # Fall back to base measurer
+    # Fall back to base measurer (requires pixels_per_inch)
     return SnowStakeMeasurer(
         pixels_per_inch=calibration.get('pixels_per_inch'),
         debug=False
@@ -2723,8 +3126,8 @@ def api_remeasure_single(resort, measurement_id):
         # Create measurer and measure (uses resort-specific measurer if available)
         measurer = get_measurer_for_resort(resort, calibration)
 
-        # WinterParkMeasurer has different API - measure_from_file takes only image path
-        if resort == 'winter_park' and hasattr(measurer, 'measure_from_file'):
+        # WinterParkMeasurer takes only image path (calibration passed in constructor)
+        if hasattr(measurer, 'measure_from_file') and 'WinterParkMeasurer' in type(measurer).__name__:
             result = measurer.measure_from_file(actual_path)
         else:
             result = measurer.measure_from_file(actual_path, calibration)
@@ -2754,6 +3157,105 @@ def api_remeasure_single(resort, measurement_id):
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/measure_image/<resort>/<path:image_filename>', methods=['POST'])
+def api_measure_image(resort, image_filename):
+    """Measure a single image by filename (for uncalibrated resorts or new images)."""
+    from db import SnowDatabase
+    import re
+
+    try:
+        db = SnowDatabase(DB_PATH)
+
+        # Find the image file
+        actual_path = os.path.join(OUT_DIR, image_filename)
+        if not os.path.exists(actual_path):
+            return jsonify({'success': False, 'error': f'Image not found: {image_filename}'}), 404
+
+        # Extract timestamp from filename
+        match = re.search(r'_(\d{8})_(\d{6})\.jpg$', image_filename)
+        if not match:
+            return jsonify({'success': False, 'error': 'Cannot parse timestamp from filename'}), 400
+
+        date_str, time_str = match.groups()
+        timestamp_str = f'{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]} {time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}'
+        timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+
+        # Get calibration
+        calibration = db.get_current_calibration_version(resort)
+        if not calibration:
+            calibration = get_calibration(resort)
+        if not calibration:
+            return jsonify({'success': False, 'error': 'No calibration found'}), 400
+
+        # Check if calibration is enabled
+        if not calibration.get('enabled', False):
+            return jsonify({'success': False, 'error': 'Resort not calibrated yet. Please calibrate first.'}), 400
+
+        # Create measurer and measure
+        measurer = get_measurer_for_resort(resort, calibration)
+
+        if hasattr(measurer, 'measure_from_file'):
+            result = measurer.measure_from_file(actual_path)
+        else:
+            result = measurer.measure_from_file(actual_path, calibration)
+
+        # Check if measurement already exists
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT id FROM snow_measurements WHERE resort = ? AND image_path = ?',
+            (resort, image_filename)
+        )
+        existing = cursor.fetchone()
+
+        if existing:
+            # Update existing measurement
+            cursor.execute('''
+                UPDATE snow_measurements
+                SET snow_depth_inches = ?, confidence_score = ?, sample_data = ?, notes = ?
+                WHERE id = ?
+            ''', (
+                result.snow_depth_inches,
+                result.confidence_score,
+                json.dumps(_convert_numpy_types(result.samples)) if hasattr(result, 'samples') and result.samples else None,
+                getattr(result, 'notes', ''),
+                existing['id']
+            ))
+            conn.commit()
+            new_id = existing['id']
+        else:
+            # Insert new measurement
+            cursor.execute('''
+                INSERT INTO snow_measurements
+                (resort, timestamp, snow_depth_inches, confidence_score, image_path, sample_data, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                resort,
+                timestamp_str,
+                result.snow_depth_inches,
+                result.confidence_score,
+                image_filename,
+                json.dumps(_convert_numpy_types(result.samples)) if hasattr(result, 'samples') and result.samples else None,
+                getattr(result, 'notes', '')
+            ))
+            conn.commit()
+            new_id = cursor.lastrowid
+
+        conn.close()
+
+        return jsonify({
+            'success': True,
+            'id': new_id,
+            'depth': result.snow_depth_inches,
+            'confidence': result.confidence_score
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 
 @app.route('/api/calibration/<resort>/properties', methods=['GET'])
@@ -2929,8 +3431,8 @@ def api_remeasure(resort):
                 # Create measurer and measure (uses resort-specific measurer if available)
                 measurer = get_measurer_for_resort(resort, calibration)
 
-                # WinterParkMeasurer has different API
-                if resort == 'winter_park' and hasattr(measurer, 'measure_from_file'):
+                # WinterParkMeasurer takes only image path (calibration passed in constructor)
+                if hasattr(measurer, 'measure_from_file') and 'WinterParkMeasurer' in type(measurer).__name__:
                     result = measurer.measure_from_file(actual_path)
                 else:
                     result = measurer.measure_from_file(actual_path, calibration)
